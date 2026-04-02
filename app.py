@@ -14,7 +14,6 @@ Lancement :
 from datetime import date, timedelta
 
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
 
@@ -120,63 +119,22 @@ def risk_emoji(risk_level: str) -> str:
     return {"faible": "✅", "modere": "⚠️", "eleve": "🚨"}.get(risk_level, "❓")
 
 
-def probability_gauge(probability: float, risk_level: str) -> go.Figure:
-    """Crée une jauge Plotly pour afficher la probabilité de pluie."""
-    color = risk_color(risk_level)
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=round(probability * 100, 1),
-        number={"suffix": "%", "font": {"size": 36, "color": color}},
-        title={"text": "Probabilité de pluie", "font": {"size": 14, "color": "#555"}},
-        gauge={
-            "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#888"},
-            "bar": {"color": color, "thickness": 0.3},
-            "bgcolor": "white",
-            "borderwidth": 1,
-            "bordercolor": "#ddd",
-            "steps": [
-                {"range": [0, 35],  "color": "#E2EFDA"},
-                {"range": [35, 60], "color": "#FFF3CD"},
-                {"range": [60, 100],"color": "#FCE4D6"},
-            ],
-            "threshold": {
-                "line": {"color": color, "width": 4},
-                "thickness": 0.75,
-                "value": probability * 100,
-            },
-        },
-    ))
-    fig.update_layout(
-        height=250,
-        margin={"t": 40, "b": 20, "l": 40, "r": 40},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
+def probability_gauge(probability: float, risk_level: str):
+    """Affiche la probabilité de pluie avec les composants natifs Streamlit."""
+    pct = round(probability * 100, 1)
+    st.caption("Probabilité de pluie")
+    st.progress(probability)
+    st.metric(label="", value=f"{pct} %")
 
 
-def feature_importance_chart(importances: dict) -> go.Figure:
-    """Graphique en barres de l'importance des variables."""
-    items = sorted(importances.items(), key=lambda x: x[1])
-    labels = [k.replace("_", " ").title() for k, _ in items]
-    values = [v for _, v in items]
-
-    fig = go.Figure(go.Bar(
-        x=values, y=labels,
-        orientation="h",
-        marker_color="#2E75B6",
-        text=[f"{v:.3f}" for v in values],
-        textposition="outside",
-    ))
-    fig.update_layout(
-        title="Importance des variables du modèle",
-        xaxis_title="Importance relative",
-        height=350,
-        margin={"t": 50, "b": 20, "l": 150, "r": 60},
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
+def feature_importance_chart(importances: dict):
+    """Graphique en barres natif Streamlit pour l'importance des variables."""
+    df = pd.DataFrame(
+        importances.items(), columns=["Variable", "Importance"]
+    ).sort_values("Importance", ascending=False)
+    df["Variable"] = df["Variable"].str.replace("_", " ").str.title()
+    st.markdown("**Importance des variables du modèle**")
+    st.bar_chart(df.set_index("Variable"))
 
 
 # ─── Interface principale ─────────────────────────────────────────────────────
@@ -249,7 +207,7 @@ if predict_btn:
         # Jauge + métriques côte à côte
         col_gauge, col_info = st.columns([1.5, 1])
         with col_gauge:
-            st.plotly_chart(probability_gauge(proba, risk), use_container_width=True)
+            probability_gauge(proba, risk)
         with col_info:
             st.markdown("<br><br>", unsafe_allow_html=True)
             st.markdown(f"""
@@ -303,7 +261,7 @@ with st.expander("📊 Performances du modèle — Transparence & Limites"):
         # Feature importance
         imp = metrics.get("feature_importance")
         if imp:
-            st.plotly_chart(feature_importance_chart(imp), use_container_width=True)
+            feature_importance_chart(imp)
 
         st.markdown("### ⚠️ Limitations du modèle")
         st.markdown("""
