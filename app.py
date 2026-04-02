@@ -78,7 +78,7 @@ st.markdown("""
 @st.cache_data(show_spinner=False)
 def load_synop_data():
     end   = str(date.today() - timedelta(days=5))
-    start = "2020-01-01"
+    start = "2022-01-01"  # réduit à 2 ans pour éviter les timeouts
     params = {
         "where": (
             f'numer_sta="{STATION_ID}" '
@@ -91,11 +91,23 @@ def load_synop_data():
         "delimiter": ";",
     }
     try:
-        r = requests.get(SYNOP_URL, params=params, timeout=120)
+        r = requests.get(
+            SYNOP_URL, params=params, timeout=120,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
         r.raise_for_status()
+        if not r.text.strip():
+            st.error("Réponse vide de l'API SYNOP.")
+            return pd.DataFrame()
         return pd.read_csv(StringIO(r.text), sep=";", low_memory=False)
+    except requests.exceptions.Timeout:
+        st.error("Timeout — l'API SYNOP met trop de temps à répondre.")
+        return pd.DataFrame()
+    except requests.exceptions.HTTPError as e:
+        st.error(f"Erreur HTTP {e.response.status_code} : {e.response.text[:300]}")
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Erreur collecte SYNOP : {e}")
+        st.error(f"Erreur inattendue : {type(e).__name__} — {e}")
         return pd.DataFrame()
 
 
