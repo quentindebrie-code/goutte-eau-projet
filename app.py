@@ -75,39 +75,29 @@ st.markdown("""
 
 # ─── Collecte SYNOP ───────────────────────────────────────────────────────────
 
+OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
+
 @st.cache_data(show_spinner=False)
 def load_synop_data():
-    end   = str(date.today() - timedelta(days=5))
-    start = "2022-01-01"  # réduit à 2 ans pour éviter les timeouts
     params = {
-        "where": (
-            f'numer_sta="{STATION_ID}" '
-            f'AND date>="{start}T00:00:00Z" '
-            f'AND date<="{end}T23:59:59Z"'
-        ),
-        "select": "date,t,u,pres,ff,n,rr3",
-        "order_by": "date ASC",
+        "latitude": 48.8566,
+        "longitude": 2.3522,
+        "start_date": "2020-01-01",
+        "end_date": str(date.today() - timedelta(days=2)),
+        "daily": ",".join([
+            "temperature_2m_max", "temperature_2m_min",
+            "relative_humidity_2m_mean", "surface_pressure_mean",
+            "wind_speed_10m_max", "cloud_cover_mean", "precipitation_sum"
+        ]),
         "timezone": "Europe/Paris",
-        "delimiter": ";",
     }
     try:
-        r = requests.get(
-            SYNOP_URL, params=params, timeout=120,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        r = requests.get(OPEN_METEO_URL, params=params, timeout=30)
         r.raise_for_status()
-        if not r.text.strip():
-            st.error("Réponse vide de l'API SYNOP.")
-            return pd.DataFrame()
-        return pd.read_csv(StringIO(r.text), sep=";", low_memory=False)
-    except requests.exceptions.Timeout:
-        st.error("Timeout — l'API SYNOP met trop de temps à répondre.")
-        return pd.DataFrame()
-    except requests.exceptions.HTTPError as e:
-        st.error(f"Erreur HTTP {e.response.status_code} : {e.response.text[:300]}")
-        return pd.DataFrame()
+        data = r.json()
+        return pd.DataFrame(data["daily"])
     except Exception as e:
-        st.error(f"Erreur inattendue : {type(e).__name__} — {e}")
+        st.error(f"Erreur : {e}")
         return pd.DataFrame()
 
 
@@ -115,40 +105,23 @@ def load_synop_data():
 
 @st.cache_data(show_spinner=False)
 def prepare_dataset(df_raw):
-    df = df_raw.copy()
-    df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
-    df["date"] = df["date"].dt.tz_convert("Europe/Paris").dt.date
-    df = df.dropna(subset=["date"])
-
-    df["t"]    = pd.to_numeric(df["t"],    errors="coerce") - 273.15
-    df["pres"] = pd.to_numeric(df["pres"], errors="coerce") / 100
-    df["ff"]   = pd.to_numeric(df["ff"],   errors="coerce") * 3.6
-    df["u"]    = pd.to_numeric(df["u"],    errors="coerce")
-    df["n"]    = pd.to_numeric(df["n"],    errors="coerce")
-    df["rr3"]  = pd.to_numeric(df["rr3"],  errors="coerce").fillna(0)
-
-    daily = df.groupby("date").agg(
-        temp_max    =("t",    "max"),
-        temp_min    =("t",    "min"),
-        humidity_avg=("u",    "mean"),
-        pressure_avg=("pres", "mean"),
-        wind_avg    =("ff",   "max"),
-        cloud_cover =("n",    "mean"),
-        precip_sum  =("rr3",  "sum"),
-    ).reset_index()
-
-    daily["cloud_cover"] = (daily["cloud_cover"] / 8 * 100).round(1)
-    daily = daily.sort_values("date").reset_index(drop=True)
-    daily["rain_tomorrow"] = (daily["precip_sum"].shift(-1) > 0.5).astype(int)
-    daily = daily.iloc[:-1].copy().drop(columns=["precip_sum"])
-
-    daily["date"]        = pd.to_datetime(daily["date"])
-    daily["temp_range"]  = daily["temp_max"] - daily["temp_min"]
-    daily["month"]       = daily["date"].dt.month
-    daily["day_of_year"] = daily["date"].dt.dayofyear
-    daily["date"]        = daily["date"].dt.strftime("%Y-%m-%d")
-
-    return daily.dropna()
+    df = df_raw.rename(columns={
+        "time": "date",
+        "temperature_2m_max": "temp_max",
+        "temperature_2m_min": "temp_min",
+        "relative_humidity_2m_mean": "humidity_avg",
+        "surface_pressure_mean": "pressure_avg",
+        "wind_speed_10m_max": "wind_avg",
+        "cloud_cover_mean": "cloud_cover",
+    })
+    df["rain_tomorrow"] = (df["precipitation_sum"].shift(-1) > 0.5).astype(int)
+    df = df.iloc[:-1].copy().drop(columns=["precipitation_sum"])
+    df["date"] = pd.to_datetime(df["date"])
+    df["temp_range"]  = df["temp_max"] - df["temp_min"]
+    df["month"]       = df["date"].dt.month
+    df["day_of_year"] = df["date"].dt.dayofyear
+    df["date"]        = df["date"].dt.strftime("%Y-%m-%d")
+    return df.dropna()
 
 
 # ─── Entraînement ────────────────────────────────────────────────────────────
