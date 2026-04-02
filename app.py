@@ -1,21 +1,25 @@
 """
-app.py — Interface Streamlit — Projet Goutte d'Eau MVP
+app.py — Interface Streamlit autonome — Projet Goutte d'Eau MVP
 Bloc 2 — Compétence C15
 
-Interface agriculteur : information immédiatement actionnable, sans jargon technique.
-
-Prérequis : API FastAPI lancée sur http://localhost:8000
-    uvicorn main:app --reload  (depuis src/)
+Version autonome : collecte, entraînement et prédiction intégrés directement.
+Aucune dépendance à FastAPI — fonctionne sur Streamlit Cloud.
 
 Lancement :
     streamlit run app.py
 """
 
 from datetime import date, timedelta
+from io import StringIO
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 # ─── Configuration page ───────────────────────────────────────────────────────
 
@@ -26,120 +30,203 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-API_BASE = "http://localhost:8000"
+# ─── Constantes ───────────────────────────────────────────────────────────────
+
+STATION_ID = "07156"  # Paris-Montsouris
+SYNOP_URL  = (
+    "https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/"
+    "donnees-synop-essentielles-omm/exports/csv"
+)
+FEATURES = [
+    "temp_max", "temp_min", "humidity_avg",
+    "pressure_avg", "wind_avg", "cloud_cover",
+    "temp_range", "month", "day_of_year",
+]
 
 # ─── Styles CSS ───────────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
-    /* En-tête */
     .main-header {
         background: linear-gradient(135deg, #1F497D, #2E75B6);
-        color: white;
-        padding: 2rem;
-        border-radius: 10px;
-        margin-bottom: 2rem;
-        text-align: center;
+        color: white; padding: 2rem; border-radius: 10px;
+        margin-bottom: 2rem; text-align: center;
     }
     .main-header h1 { color: white; margin: 0; font-size: 2rem; }
-    .main-header p { color: #B8D4F0; margin: 0.5rem 0 0 0; font-size: 1rem; }
-
-    /* Cartes de risque */
-    .risk-card {
-        padding: 1.5rem;
-        border-radius: 10px;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    .risk-faible  { background: #E2EFDA; border-left: 6px solid #375623; }
-    .risk-modere  { background: #FFF3CD; border-left: 6px solid #C55A11; }
-    .risk-eleve   { background: #FCE4D6; border-left: 6px solid #C00000; }
-
-    /* Textes */
+    .main-header p  { color: #B8D4F0; margin: 0.5rem 0 0 0; font-size: 1rem; }
+    .risk-card { padding: 1.5rem; border-radius: 10px; text-align: center; margin: 1rem 0; }
+    .risk-faible { background: #E2EFDA; border-left: 6px solid #375623; }
+    .risk-modere { background: #FFF3CD; border-left: 6px solid #C55A11; }
+    .risk-eleve  { background: #FCE4D6; border-left: 6px solid #C00000; }
     .risk-label  { font-size: 1.5rem; font-weight: bold; margin-bottom: 0.5rem; }
-    .risk-proba  { font-size: 2.5rem; font-weight: bold; }
     .advice-box  {
-        background: #F0F4FF;
-        border-radius: 8px;
-        padding: 1rem 1.5rem;
-        margin-top: 1rem;
-        font-size: 0.95rem;
-        color: #1F497D;
+        background: #F0F4FF; border-radius: 8px;
+        padding: 1rem 1.5rem; margin-top: 1rem;
+        font-size: 0.95rem; color: #1F497D;
     }
-    .disclaimer  { font-size: 0.8rem; color: #888; margin-top: 2rem; }
+    .disclaimer { font-size: 0.8rem; color: #888; margin-top: 2rem; }
     .metric-card {
-        background: #F8FBFF;
-        border-radius: 8px;
-        padding: 1rem;
-        text-align: center;
-        border: 1px solid #D0E4F7;
+        background: #F8FBFF; border-radius: 8px; padding: 1rem;
+        text-align: center; border: 1px solid #D0E4F7;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─── Fonctions utilitaires ───────────────────────────────────────────────────
+# ─── Collecte SYNOP ───────────────────────────────────────────────────────────
 
-def check_api_health() -> dict | None:
-    """Vérifie que l'API FastAPI est accessible."""
+@st.cache_data(show_spinner=False)
+def load_synop_data():
+    end   = str(date.today() - timedelta(days=5))
+    start = "2020-01-01"
+    params = {
+        "where": (
+            f'numer_sta="{STATION_ID}" '
+            f'AND date>="{start}T00:00:00Z" '
+            f'AND date<="{end}T23:59:59Z"'
+        ),
+        "select": "date,t,u,pres,ff,n,rr3",
+        "order_by": "date ASC",
+        "timezone": "Europe/Paris",
+        "delimiter": ";",
+    }
     try:
-        r = requests.get(f"{API_BASE}/health", timeout=5)
-        return r.json() if r.status_code == 200 else None
-    except Exception:
-        return None
+        r = requests.get(SYNOP_URL, params=params, timeout=120)
+        r.raise_for_status()
+        return pd.read_csv(StringIO(r.text), sep=";", low_memory=False)
+    except Exception as e:
+        st.error(f"Erreur collecte SYNOP : {e}")
+        return pd.DataFrame()
 
 
-def get_prediction(target_date: str) -> dict | None:
-    """Interroge l'API pour obtenir la prédiction."""
-    try:
-        r = requests.get(f"{API_BASE}/predict", params={"date": target_date}, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        st.error(f"Erreur API ({r.status_code}) : {r.json().get('detail', 'Erreur inconnue')}")
-        return None
-    except requests.exceptions.ConnectionError:
-        st.error("Impossible de joindre l'API. Vérifiez que FastAPI est lancée (uvicorn main:app).")
-        return None
+# ─── Nettoyage & agrégation journalière ──────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def prepare_dataset(df_raw):
+    df = df_raw.copy()
+    df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    df["date"] = df["date"].dt.tz_convert("Europe/Paris").dt.date
+    df = df.dropna(subset=["date"])
+
+    df["t"]    = pd.to_numeric(df["t"],    errors="coerce") - 273.15
+    df["pres"] = pd.to_numeric(df["pres"], errors="coerce") / 100
+    df["ff"]   = pd.to_numeric(df["ff"],   errors="coerce") * 3.6
+    df["u"]    = pd.to_numeric(df["u"],    errors="coerce")
+    df["n"]    = pd.to_numeric(df["n"],    errors="coerce")
+    df["rr3"]  = pd.to_numeric(df["rr3"],  errors="coerce").fillna(0)
+
+    daily = df.groupby("date").agg(
+        temp_max    =("t",    "max"),
+        temp_min    =("t",    "min"),
+        humidity_avg=("u",    "mean"),
+        pressure_avg=("pres", "mean"),
+        wind_avg    =("ff",   "max"),
+        cloud_cover =("n",    "mean"),
+        precip_sum  =("rr3",  "sum"),
+    ).reset_index()
+
+    daily["cloud_cover"] = (daily["cloud_cover"] / 8 * 100).round(1)
+    daily = daily.sort_values("date").reset_index(drop=True)
+    daily["rain_tomorrow"] = (daily["precip_sum"].shift(-1) > 0.5).astype(int)
+    daily = daily.iloc[:-1].copy().drop(columns=["precip_sum"])
+
+    daily["date"]        = pd.to_datetime(daily["date"])
+    daily["temp_range"]  = daily["temp_max"] - daily["temp_min"]
+    daily["month"]       = daily["date"].dt.month
+    daily["day_of_year"] = daily["date"].dt.dayofyear
+    daily["date"]        = daily["date"].dt.strftime("%Y-%m-%d")
+
+    return daily.dropna()
 
 
-def get_metrics() -> dict | None:
-    """Récupère les métriques du modèle depuis l'API."""
-    try:
-        r = requests.get(f"{API_BASE}/metrics", timeout=5)
-        return r.json() if r.status_code == 200 else None
-    except Exception:
-        return None
+# ─── Entraînement ────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def train_model(_df):
+    X = _df[FEATURES].values
+    y = _df["rain_tomorrow"].values
+    split_idx = int(len(X) * 0.8)
+    X_train, X_test = X[:split_idx], X[split_idx:]
+    y_train, y_test = y[:split_idx], y[split_idx:]
+
+    pipeline = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", RandomForestClassifier(
+            n_estimators=100, max_depth=10,
+            min_samples_leaf=5, class_weight="balanced",
+            random_state=42, n_jobs=-1,
+        ))
+    ])
+    pipeline.fit(X_train, y_train)
+
+    y_pred  = pipeline.predict(X_test)
+    y_proba = pipeline.predict_proba(X_test)[:, 1]
+
+    metrics = {
+        "accuracy": round(accuracy_score(y_test, y_pred), 4),
+        "f1_score": round(f1_score(y_test, y_pred), 4),
+        "roc_auc":  round(roc_auc_score(y_test, y_proba), 4),
+        "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
+        "feature_importance": dict(zip(
+            FEATURES,
+            pipeline.named_steps["clf"].feature_importances_.round(4).tolist()
+        )),
+        "n_train": len(X_train),
+        "n_test":  len(X_test),
+    }
+    return pipeline, metrics
 
 
-def risk_color(risk_level: str) -> str:
-    return {"faible": "#375623", "modere": "#C55A11", "eleve": "#C00000"}.get(risk_level, "#333")
+# ─── Prédiction ───────────────────────────────────────────────────────────────
+
+def predict(pipeline, df, target_date):
+    date_str = target_date.strftime("%Y-%m-%d")
+    row = df[df["date"] == date_str]
+
+    if not row.empty:
+        feat_row = row.iloc[0]
+    else:
+        month  = target_date.month
+        df_tmp = df.copy()
+        df_tmp["date"] = pd.to_datetime(df_tmp["date"])
+        monthly = df_tmp[df_tmp["date"].dt.month == month]
+        if monthly.empty:
+            return None
+        feat_row = monthly[FEATURES].mean()
+        feat_row["month"]       = month
+        feat_row["day_of_year"] = target_date.timetuple().tm_yday
+
+    features = np.array([[feat_row[f] for f in FEATURES]])
+    probability = float(pipeline.predict_proba(features)[0][1])
+
+    if probability < 0.35:
+        return {
+            "risk_level": "faible", "risk_label": "Risque faible de pluie",
+            "probability": round(probability, 3),
+            "confidence": "haute" if probability < 0.20 else "modérée",
+            "advice": "Conditions favorables. Risque de précipitations limité pour demain.",
+        }
+    elif probability < 0.60:
+        return {
+            "risk_level": "modere", "risk_label": "Risque modéré de pluie",
+            "probability": round(probability, 3), "confidence": "modérée",
+            "advice": "Incertitude sur les précipitations. Prévoir un plan de secours.",
+        }
+    else:
+        return {
+            "risk_level": "eleve", "risk_label": "Risque élevé de pluie",
+            "probability": round(probability, 3),
+            "confidence": "haute" if probability > 0.80 else "modérée",
+            "advice": "Probabilité élevée de pluie demain. Déconseillé pour les interventions sensibles.",
+        }
 
 
-def risk_emoji(risk_level: str) -> str:
-    return {"faible": "✅", "modere": "⚠️", "eleve": "🚨"}.get(risk_level, "❓")
+def risk_color(r): return {"faible":"#375623","modere":"#C55A11","eleve":"#C00000"}.get(r,"#333")
+def risk_emoji(r): return {"faible":"✅","modere":"⚠️","eleve":"🚨"}.get(r,"❓")
 
 
-def probability_gauge(probability: float, risk_level: str):
-    """Affiche la probabilité de pluie avec les composants natifs Streamlit."""
-    pct = round(probability * 100, 1)
-    st.caption("Probabilité de pluie")
-    st.progress(probability)
-    st.metric(label="", value=f"{pct} %")
+# ─── Interface ───────────────────────────────────────────────────────────────
 
-
-def feature_importance_chart(importances: dict):
-    """Graphique en barres natif Streamlit pour l'importance des variables."""
-    df = pd.DataFrame(
-        importances.items(), columns=["Variable", "Importance"]
-    ).sort_values("Importance", ascending=False)
-    df["Variable"] = df["Variable"].str.replace("_", " ").str.title()
-    st.markdown("**Importance des variables du modèle**")
-    st.bar_chart(df.set_index("Variable"))
-
-
-# ─── Interface principale ─────────────────────────────────────────────────────
-
-# En-tête
 st.markdown("""
 <div class="main-header">
     <h1>💧 Projet Goutte d'Eau</h1>
@@ -147,34 +234,34 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Statut API
-health = check_api_health()
-if health is None:
-    st.error("⛔ API FastAPI non accessible. Lancez : `uvicorn main:app --reload` depuis le dossier `src/`")
+with st.spinner("⏳ Chargement des données SYNOP Météo France..."):
+    df_raw = load_synop_data()
+
+if df_raw.empty:
+    st.error("Impossible de charger les données météo.")
     st.stop()
 
-if not health.get("model_loaded"):
-    st.warning("⚠️ Modèle non chargé. Lancez : `python train.py` depuis le dossier `src/`")
+with st.spinner("⚙️ Préparation des données..."):
+    df = prepare_dataset(df_raw)
+
+if len(df) < 100:
+    st.error("Données insuffisantes.")
     st.stop()
 
-if not health.get("db_available"):
-    st.warning("⚠️ Base de données non trouvée. Lancez : `python collect.py` depuis le dossier `src/`")
-    st.stop()
+with st.spinner("🤖 Entraînement du modèle..."):
+    pipeline, metrics = train_model(df)
 
-st.success("✅ API connectée — Modèle chargé — Base de données disponible")
-
+st.success(f"✅ Modèle prêt — {len(df)} jours d'observations — Accuracy : {metrics['accuracy']:.1%}")
 st.markdown("---")
 
-# ─── Sélecteur de date + prédiction ──────────────────────────────────────────
-
+# Sélecteur de date
 st.subheader("📅 Sélectionnez une date")
-st.caption("L'API estimera le risque de pluie pour le lendemain de la date choisie.")
+st.caption("Le modèle estimera le risque de pluie pour le lendemain de la date choisie.")
 
 col1, col2 = st.columns([2, 1])
 with col1:
     selected_date = st.date_input(
-        "Date de référence",
-        value=date.today() - timedelta(days=1),
+        "Date", value=date.today() - timedelta(days=1),
         min_value=date(2020, 1, 1),
         max_value=date.today() + timedelta(days=365),
         label_visibility="collapsed",
@@ -184,103 +271,86 @@ with col2:
 
 st.caption(f"Estimation pour : **{(selected_date + timedelta(days=1)).strftime('%A %d %B %Y').capitalize()}**")
 
-# ─── Résultat ─────────────────────────────────────────────────────────────────
-
+# Résultat
 if predict_btn:
-    with st.spinner("Calcul en cours..."):
-        result = get_prediction(selected_date.strftime("%Y-%m-%d"))
-
-    if result:
-        risk = result["risk_level"]
+    result = predict(pipeline, df, selected_date)
+    if result is None:
+        st.warning("Données insuffisantes pour cette date.")
+    else:
+        risk  = result["risk_level"]
         proba = result["probability"]
-        emoji = risk_emoji(risk)
-
-        # Carte de risque principale
-        css_class = f"risk-{risk}"
         color = risk_color(risk)
+
         st.markdown(f"""
-        <div class="risk-card {css_class}">
-            <div class="risk-label" style="color:{color}">{emoji} {result['risk_label']}</div>
+        <div class="risk-card risk-{risk}">
+            <div class="risk-label" style="color:{color}">
+                {risk_emoji(risk)} {result['risk_label']}
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Jauge + métriques côte à côte
-        col_gauge, col_info = st.columns([1.5, 1])
-        with col_gauge:
-            probability_gauge(proba, risk)
-        with col_info:
-            st.markdown("<br><br>", unsafe_allow_html=True)
+        col_g, col_i = st.columns([1.5, 1])
+        with col_g:
+            st.caption("Probabilité de pluie")
+            st.progress(proba)
+            st.metric(label="", value=f"{round(proba*100,1)} %")
+        with col_i:
+            st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(f"""
             <div class="metric-card">
-                <div style="font-size:0.85rem; color:#888">Probabilité</div>
-                <div style="font-size:2rem; font-weight:bold; color:{color}">{round(proba*100,1)}%</div>
-            </div>
-            <br>
-            <div class="metric-card">
-                <div style="font-size:0.85rem; color:#888">Confiance</div>
-                <div style="font-size:1.2rem; font-weight:bold; color:#1F497D">{result['confidence'].upper()}</div>
+                <div style="font-size:0.85rem;color:#888">Confiance</div>
+                <div style="font-size:1.2rem;font-weight:bold;color:#1F497D">
+                    {result['confidence'].upper()}
+                </div>
             </div>
             """, unsafe_allow_html=True)
 
-        # Conseil opérationnel
         st.markdown(f"""
-        <div class="advice-box">
-            <strong>💡 Conseil :</strong> {result['advice']}
+        <div class="advice-box"><strong>💡 Conseil :</strong> {result['advice']}</div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="disclaimer">
+        ℹ️ Estimation basée sur les données SYNOP historiques de Paris (75).
+        Ne se substitue pas à une prévision officielle Météo France.
         </div>
         """, unsafe_allow_html=True)
 
-        # Disclaimer
-        st.markdown(f"""
-        <div class="disclaimer">ℹ️ {result['disclaimer']}</div>
-        """, unsafe_allow_html=True)
-
-# ─── Section "En savoir plus" (métriques modèle) ─────────────────────────────
-
+# Section métriques
 st.markdown("---")
 with st.expander("📊 Performances du modèle — Transparence & Limites"):
-    metrics = get_metrics()
-    if metrics:
-        st.markdown("### Métriques d'évaluation (jeu de test)")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Accuracy", f"{metrics['accuracy']:.1%}")
+    c2.metric("F1-Score", f"{metrics['f1_score']:.3f}")
+    c3.metric("ROC-AUC",  f"{metrics['roc_auc']:.3f}")
+    st.caption(f"Entraîné sur {metrics['n_train']} jours — Testé sur {metrics['n_test']} jours")
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Accuracy", f"{metrics.get('accuracy', 'N/A'):.1%}")
-        col2.metric("F1-Score", f"{metrics.get('f1_score', 'N/A'):.3f}")
-        col3.metric("ROC-AUC",  f"{metrics.get('roc_auc', 'N/A'):.3f}")
+    st.markdown("### Matrice de confusion")
+    cm = metrics["confusion_matrix"]
+    st.dataframe(pd.DataFrame(
+        cm, index=["Réel : Sec","Réel : Pluie"],
+        columns=["Prédit : Sec","Prédit : Pluie"]
+    ), use_container_width=True)
 
-        # Matrice de confusion
-        cm = metrics.get("confusion_matrix")
-        if cm:
-            st.markdown("### Matrice de confusion")
-            cm_df = pd.DataFrame(
-                cm,
-                index=["Réel : Sec", "Réel : Pluie"],
-                columns=["Prédit : Sec", "Prédit : Pluie"]
-            )
-            st.dataframe(cm_df, use_container_width=True)
+    st.markdown("### Importance des variables")
+    imp_df = pd.DataFrame(
+        metrics["feature_importance"].items(), columns=["Variable","Importance"]
+    ).sort_values("Importance", ascending=False)
+    imp_df["Variable"] = imp_df["Variable"].str.replace("_"," ").str.title()
+    st.bar_chart(imp_df.set_index("Variable"))
 
-        # Feature importance
-        imp = metrics.get("feature_importance")
-        if imp:
-            feature_importance_chart(imp)
-
-        st.markdown("### ⚠️ Limitations du modèle")
-        st.markdown("""
-        - **Périmètre géographique** : Paris (75) uniquement. Biais urbain (îlots de chaleur, artificialisation des sols).
-        - **Données futures** : pour les dates sans données historiques, l'API utilise des moyennes saisonnières (proxy imparfait).
-        - **Granularité** : prévision journalière uniquement (pas horaire).
-        - **Modèle** : Random Forest, choisi pour sa légèreté et son interprétabilité. Un modèle plus complexe pourrait améliorer les performances au coût d'une empreinte carbone plus élevée.
-        - **Ce MVP ne se substitue pas à une prévision météorologique officielle Météo France.**
-        """)
-    else:
-        st.warning("Métriques non disponibles.")
-
-# ─── Footer ───────────────────────────────────────────────────────────────────
+    st.markdown("### ⚠️ Limitations")
+    st.markdown("""
+    - **Périmètre** : Paris (75) uniquement — biais urbain documenté
+    - **Dates futures** : moyennes saisonnières utilisées comme proxy
+    - **Modèle léger** : Random Forest, pas de deep learning (éco-responsabilité C12)
+    - **Ne se substitue pas** à une prévision officielle Météo France
+    """)
 
 st.markdown("---")
 st.markdown(
-    "<div style='text-align:center; font-size:0.8rem; color:#aaa'>"
+    "<div style='text-align:center;font-size:0.8rem;color:#aaa'>"
     "Projet Goutte d'Eau — MVP BLOC 2 — Mastère MTD IA — Institut Léonard de Vinci<br>"
-    "Données : Open-Meteo (open-source) — Modèle : Random Forest (scikit-learn)"
-    "</div>",
-    unsafe_allow_html=True,
+    "Source : SYNOP Météo France (data.gouv.fr) — Modèle : Random Forest (scikit-learn)"
+    "</div>", unsafe_allow_html=True,
 )
