@@ -2,25 +2,25 @@
 # Dépendances Python
 
 # ─── Collecte de données ──────────────────────────────────────────
-requests==2.32.3
+requests
 
 # ─── Data Science ─────────────────────────────────────────────────
-pandas==2.2.3
-numpy==2.1.3
-scikit-learn==1.5.2
-joblib==1.4.2
+pandas
+numpy
+scikit-learn
+joblib
 sklearn
 
 # ─── API ──────────────────────────────────────────────────────────
-fastapi==0.115.4
-uvicorn[standard]==0.32.0
-pydantic==2.9.2
+fastapi
+uvicorn[standard]
+pydantic
 
 # ─── Interface utilisateur ────────────────────────────────────────
-streamlit==1.40.1
+streamlit
 plotly
 
 # ─── Tests ────────────────────────────────────────────────────────
-pytest==8.3.3
-pytest-cov==6.0.0
-httpx==0.27.2   # client HTTP pour TestClient FastAPI
+pytest
+pytest-cov
+httpx
