@@ -1,26 +1,11 @@
-# Projet Goutte d'Eau — MVP BLOC 2
-# Dépendances Python
-
-# ─── Collecte de données ──────────────────────────────────────────
 requests
-
-# ─── Data Science ─────────────────────────────────────────────────
 pandas
 numpy
 scikit-learn
 joblib
-sklearn
-
-# ─── API ──────────────────────────────────────────────────────────
 fastapi
 uvicorn[standard]
 pydantic
-
-# ─── Interface utilisateur ────────────────────────────────────────
 streamlit
-plotly
-
-# ─── Tests ────────────────────────────────────────────────────────
 pytest
-pytest-cov
 httpx
