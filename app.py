@@ -1,1 +1,1 @@
-from src.app import *
+exec(open("src/app.py").read())
