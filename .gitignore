@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+venv/
+.env
+data/weather.db
+model/model.pkl
+model/evaluation.json
+.vscode/
+.idea/
+.DS_Store
+.pytest_cache/
+htmlcov/
+.coverage
+*.log
+*.tmp
