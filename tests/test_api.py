@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-# ─── Fixtures ─────────────────────────────────────────────────────────────────
+# Fixtures
 
 @pytest.fixture
 def temp_db():
@@ -81,7 +81,7 @@ def client(temp_db, mock_model, tmp_path):
         yield TestClient(app)
 
 
-# ─── Tests endpoint /health ───────────────────────────────────────────────────
+# Tests endpoint /health
 
 class TestHealth:
     def test_health_returns_200(self, client):
@@ -99,7 +99,7 @@ class TestHealth:
         assert data["status"] == "ok"
 
 
-# ─── Tests endpoint /predict ──────────────────────────────────────────────────
+# Tests endpoint /predict
 
 class TestPredict:
     def test_predict_valid_date(self, client):
@@ -137,7 +137,7 @@ class TestPredict:
         assert response.status_code == 422
 
 
-# ─── Tests endpoint /metrics ──────────────────────────────────────────────────
+# Tests endpoint /metrics
 
 class TestMetrics:
     def test_metrics_returns_200(self, client):
@@ -150,7 +150,7 @@ class TestMetrics:
         assert isinstance(data["accuracy"], float)
 
 
-# ─── Tests de la logique de conversion risque ─────────────────────────────────
+# Tests de la logique de conversion risque
 
 class TestRiskConversion:
     """Tests unitaires de la fonction _probability_to_risk."""
