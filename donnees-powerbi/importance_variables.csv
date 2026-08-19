@@ -1,0 +1,10 @@
+﻿version_modele,variable,importance
+1.0.0,pressure_avg,0.34785
+1.0.0,cloud_cover,0.13578
+1.0.0,wind_avg,0.11023
+1.0.0,humidity_avg,0.09272
+1.0.0,temp_max,0.08053
+1.0.0,temp_min,0.07495
+1.0.0,temp_range,0.06829
+1.0.0,day_of_year,0.06823
+1.0.0,month,0.02142
