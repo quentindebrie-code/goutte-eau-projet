@@ -30,6 +30,11 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+try:
+    from .weather import prepare_observations
+except ImportError:  # supports the documented python collect.py entry point
+    from weather import prepare_observations
+
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -98,7 +103,7 @@ def fetch_weather_data(start: str, end: str) -> pd.DataFrame:
     try:
         response = requests.get(API_URL, params=params, timeout=30)
         response.raise_for_status()
-    except requests.exceptions.ConnectionError:
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
         print("[ERREUR] Impossible de joindre l'API. Vérifiez votre connexion internet.")
         sys.exit(1)
     except requests.exceptions.HTTPError as e:
@@ -130,23 +135,9 @@ def clean_and_transform(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame nettoyé avec les colonnes du schéma SQLite
     """
-    df = df.rename(columns={"time": "date"})
-
-    # Construction de la variable cible : pluie le lendemain
-    df["rain_tomorrow"] = (df["precipitation_sum"].shift(-1) > 0.5).astype(int)
-
-    # Suppression de la dernière ligne (rain_tomorrow non calculable)
-    df = df.iloc[:-1].copy()
-
-    # Renommage pour correspondre au schéma SQLite
-    df = df.rename(columns={
-        "temperature_2m_max": "temp_max",
-        "temperature_2m_min": "temp_min",
-        "relative_humidity_2m_mean": "humidity_avg",
-        "surface_pressure_mean": "pressure_avg",
-        "wind_speed_10m_max": "wind_avg",
-        "cloud_cover_mean": "cloud_cover",
-    })
+    df, quality = prepare_observations(df)
+    if (~quality["valide"]).any():
+        print(f"[CLEAN] {(~quality['valide']).sum()} observations invalides exclues.")
 
     # Sélection des colonnes du schéma (suppression de precipitation_sum)
     columns_to_keep = [
@@ -158,6 +149,7 @@ def clean_and_transform(df: pd.DataFrame) -> pd.DataFrame:
     # Suppression des lignes incomplètes
     before = len(df)
     df = df.dropna()
+    df["rain_tomorrow"] = df["rain_tomorrow"].astype(int)
     after = len(df)
     if before != after:
         print(f"[CLEAN] {before - after} lignes supprimées (valeurs manquantes).")

@@ -1,6 +1,6 @@
 """
 app.py — Interface Streamlit autonome — Projet Goutte d'Eau MVP
-Bloc 2 — Compétence C15
+Blocs 2 et 3 — démonstration publique, qualité et traçabilité
 
 Version autonome : collecte, entraînement et prédiction intégrés directement.
 Aucune dépendance à FastAPI — fonctionne sur Streamlit Cloud.
@@ -9,17 +9,12 @@ Lancement :
     streamlit run app.py
 """
 
-from datetime import date, timedelta
-from io import StringIO
-
-import numpy as np
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+from src.weather import FEATURES, prepare_observations, train, forecast
 import pandas as pd
 import requests
 import streamlit as st
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
 # ─── Configuration page ───────────────────────────────────────────────────────
 
@@ -32,16 +27,7 @@ st.set_page_config(
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 
-STATION_ID = "07156"  # Paris-Montsouris
-SYNOP_URL  = (
-    "https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/"
-    "donnees-synop-essentielles-omm/exports/csv"
-)
-FEATURES = [
-    "temp_max", "temp_min", "humidity_avg",
-    "pressure_avg", "wind_avg", "cloud_cover",
-    "temp_range", "month", "day_of_year",
-]
+TODAY = datetime.now(ZoneInfo("Europe/Paris")).date()
 
 # ─── Styles CSS ───────────────────────────────────────────────────────────────
 
@@ -56,7 +42,7 @@ st.markdown("""
     .main-header p  { color: #B8D4F0; margin: 0.5rem 0 0 0; font-size: 1rem; }
     .risk-card { padding: 1.5rem; border-radius: 10px; text-align: center; margin: 1rem 0; }
     .risk-faible { background: #E2EFDA; border-left: 6px solid #375623; }
-    .risk-modere { background: #FFF3CD; border-left: 6px solid #C55A11; }
+    .risk-modere { background: #FFF3CD; border-left: 6px solid #7B4B00; }
     .risk-eleve  { background: #FCE4D6; border-left: 6px solid #C00000; }
     .risk-label  { font-size: 1.5rem; font-weight: bold; margin-bottom: 0.5rem; }
     .advice-box  {
@@ -64,7 +50,7 @@ st.markdown("""
         padding: 1rem 1.5rem; margin-top: 1rem;
         font-size: 0.95rem; color: #1F497D;
     }
-    .disclaimer { font-size: 0.8rem; color: #888; margin-top: 2rem; }
+    .disclaimer { font-size: 0.8rem; color: #466271; margin-top: 2rem; }
     .metric-card {
         background: #F8FBFF; border-radius: 8px; padding: 1rem;
         text-align: center; border: 1px solid #D0E4F7;
@@ -73,140 +59,41 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ─── Collecte SYNOP ───────────────────────────────────────────────────────────
+# ─── Collecte Open-Meteo Archive ─────────────────────────────────────────────
 
 OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 
-@st.cache_data(show_spinner=False)
-def load_synop_data():
-    params = {
-        "latitude": 48.8566,
-        "longitude": 2.3522,
-        "start_date": "2020-01-01",
-        "end_date": str(date.today() - timedelta(days=2)),
-        "daily": ",".join([
-            "temperature_2m_max", "temperature_2m_min",
-            "relative_humidity_2m_mean", "surface_pressure_mean",
-            "wind_speed_10m_max", "cloud_cover_mean", "precipitation_sum"
-        ]),
-        "timezone": "Europe/Paris",
-    }
-    try:
-        r = requests.get(OPEN_METEO_URL, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        return pd.DataFrame(data["daily"])
-    except Exception as e:
-        st.error(f"Erreur : {e}")
-        return pd.DataFrame()
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_weather_data(as_of):
+    params = {"latitude": 48.8566, "longitude": 2.3522, "start_date": "2020-01-01",
+              "end_date": str(as_of - timedelta(days=2)), "timezone": "Europe/Paris",
+              "daily": ",".join(["temperature_2m_max", "temperature_2m_min",
+                  "relative_humidity_2m_mean", "surface_pressure_mean",
+                  "wind_speed_10m_max", "cloud_cover_mean", "precipitation_sum"])}
+    response = requests.get(OPEN_METEO_URL, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    if "daily" not in payload or not payload["daily"].get("time"):
+        raise ValueError("Le flux ne contient pas d’observations journalières.")
+    return pd.DataFrame(payload["daily"])
 
-
-# ─── Nettoyage & agrégation journalière ──────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def prepare_dataset(df_raw):
-    df = df_raw.rename(columns={
-        "time": "date",
-        "temperature_2m_max": "temp_max",
-        "temperature_2m_min": "temp_min",
-        "relative_humidity_2m_mean": "humidity_avg",
-        "surface_pressure_mean": "pressure_avg",
-        "wind_speed_10m_max": "wind_avg",
-        "cloud_cover_mean": "cloud_cover",
-    })
-    df["rain_tomorrow"] = (df["precipitation_sum"].shift(-1) > 0.5).astype(int)
-    df = df.iloc[:-1].copy().drop(columns=["precipitation_sum"])
-    df["date"] = pd.to_datetime(df["date"])
-    df["temp_range"]  = df["temp_max"] - df["temp_min"]
-    df["month"]       = df["date"].dt.month
-    df["day_of_year"] = df["date"].dt.dayofyear
-    df["date"]        = df["date"].dt.strftime("%Y-%m-%d")
-    return df.dropna()
+def prepare_dataset(df_raw, as_of):
+    return prepare_observations(df_raw, as_of=as_of)
 
 
-# ─── Entraînement ────────────────────────────────────────────────────────────
-
-@st.cache_resource(show_spinner=False)
-def train_model(_df):
-    X = _df[FEATURES].values
-    y = _df["rain_tomorrow"].values
-    split_idx = int(len(X) * 0.8)
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
-
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", RandomForestClassifier(
-            n_estimators=100, max_depth=10,
-            min_samples_leaf=5, class_weight="balanced",
-            random_state=42, n_jobs=-1,
-        ))
-    ])
-    pipeline.fit(X_train, y_train)
-
-    y_pred  = pipeline.predict(X_test)
-    y_proba = pipeline.predict_proba(X_test)[:, 1]
-
-    metrics = {
-        "accuracy": round(accuracy_score(y_test, y_pred), 4),
-        "f1_score": round(f1_score(y_test, y_pred), 4),
-        "roc_auc":  round(roc_auc_score(y_test, y_proba), 4),
-        "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
-        "feature_importance": dict(zip(
-            FEATURES,
-            pipeline.named_steps["clf"].feature_importances_.round(4).tolist()
-        )),
-        "n_train": len(X_train),
-        "n_test":  len(X_test),
-    }
-    return pipeline, metrics
+@st.cache_resource(show_spinner=False, max_entries=4)
+def train_model(df):
+    # df must be hashed: an underscore prefix would silently reuse an old model.
+    return train(df)
 
 
-# ─── Prédiction ───────────────────────────────────────────────────────────────
-
-def predict(pipeline, df, target_date):
-    date_str = target_date.strftime("%Y-%m-%d")
-    row = df[df["date"] == date_str]
-
-    if not row.empty:
-        feat_row = row.iloc[0]
-    else:
-        month  = target_date.month
-        df_tmp = df.copy()
-        df_tmp["date"] = pd.to_datetime(df_tmp["date"])
-        monthly = df_tmp[df_tmp["date"].dt.month == month]
-        if monthly.empty:
-            return None
-        feat_row = monthly[FEATURES].mean()
-        feat_row["month"]       = month
-        feat_row["day_of_year"] = target_date.timetuple().tm_yday
-
-    features = np.array([[feat_row[f] for f in FEATURES]])
-    probability = float(pipeline.predict_proba(features)[0][1])
-
-    if probability < 0.35:
-        return {
-            "risk_level": "faible", "risk_label": "Risque faible de pluie",
-            "probability": round(probability, 3),
-            "confidence": "haute" if probability < 0.20 else "modérée",
-            "advice": "Conditions favorables. Risque de précipitations limité pour demain.",
-        }
-    elif probability < 0.60:
-        return {
-            "risk_level": "modere", "risk_label": "Risque modéré de pluie",
-            "probability": round(probability, 3), "confidence": "modérée",
-            "advice": "Incertitude sur les précipitations. Prévoir un plan de secours.",
-        }
-    else:
-        return {
-            "risk_level": "eleve", "risk_label": "Risque élevé de pluie",
-            "probability": round(probability, 3),
-            "confidence": "haute" if probability > 0.80 else "modérée",
-            "advice": "Probabilité élevée de pluie demain. Déconseillé pour les interventions sensibles.",
-        }
+def predict(pipeline, df, feature_date, quality=None):
+    return forecast(pipeline, df, feature_date + timedelta(days=1), quality)
 
 
-def risk_color(r): return {"faible":"#375623","modere":"#C55A11","eleve":"#C00000"}.get(r,"#333")
+def risk_color(r): return {"faible":"#375623","modere":"#7B4B00","eleve":"#C00000"}.get(r,"#333")
 def risk_emoji(r): return {"faible":"✅","modere":"⚠️","eleve":"🚨"}.get(r,"❓")
 
 
@@ -215,26 +102,29 @@ def risk_emoji(r): return {"faible":"✅","modere":"⚠️","eleve":"🚨"}.get(
 st.markdown("""
 <div class="main-header">
     <h1>💧 Projet Goutte d'Eau</h1>
-    <p>Estimation du risque de pluie — Paris (75) — MVP BLOC 2</p>
+    <p>Estimation du risque de pluie — Paris (75) — B3 · démonstration publique</p>
 </div>
 """, unsafe_allow_html=True)
 
-with st.spinner("⏳ Chargement des données SYNOP Météo France..."):
-    df_raw = load_synop_data()
-
-if df_raw.empty:
-    st.error("Impossible de charger les données météo.")
+if st.button("Actualiser les observations"):
+    load_weather_data.clear()
+    st.rerun()
+try:
+    with st.spinner("Chargement du flux Open-Meteo Archive…"):
+        df_raw = load_weather_data(TODAY)
+        df, df_quality = prepare_dataset(df_raw, TODAY)
+    with st.spinner("Vérification du modèle…"):
+        pipeline, metrics = train_model(df)
+except (requests.RequestException, ValueError, KeyError) as exc:
+    st.error("Données indisponibles : la prévision est suspendue.")
+    st.caption(str(exc))
     st.stop()
 
-with st.spinner("⚙️ Préparation des données..."):
-    df = prepare_dataset(df_raw)
-
-if len(df) < 100:
-    st.error("Données insuffisantes.")
-    st.stop()
-
-with st.spinner("🤖 Entraînement du modèle..."):
-    pipeline, metrics = train_model(df)
+latest = date.fromisoformat(df["date"].max())
+age = (TODAY - latest).days
+st.caption(f"Dernière observation valide : {latest:%d/%m/%Y} · ancienneté {age} jours · modèle {metrics['version_modele']}")
+if age > 4:
+    st.warning("Flux ancien. Les scénarios saisonniers ne constituent pas une prévision actuelle officielle.")
 
 st.success(f"✅ Modèle prêt — {len(df)} jours d'observations — Accuracy : {metrics['accuracy']:.1%}")
 st.markdown("---")
@@ -246,22 +136,25 @@ st.caption("Le modèle estimera le risque de pluie pour le lendemain de la date 
 col1, col2 = st.columns([2, 1])
 with col1:
     selected_date = st.date_input(
-        "Date", value=date.today() - timedelta(days=1),
+        "Date", value=TODAY - timedelta(days=1),
         min_value=date(2020, 1, 1),
-        max_value=date.today() + timedelta(days=365),
+        max_value=TODAY + timedelta(days=365),
         label_visibility="collapsed",
     )
 with col2:
     predict_btn = st.button("🔍 Estimer le risque", use_container_width=True, type="primary")
 
-st.caption(f"Estimation pour : **{(selected_date + timedelta(days=1)).strftime('%A %d %B %Y').capitalize()}**")
+st.caption(f"Estimation pour : **{(selected_date + timedelta(days=1)):%d/%m/%Y}**")
 
 # Résultat
 if predict_btn:
-    result = predict(pipeline, df, selected_date)
+    result = predict(pipeline, df, selected_date, df_quality)
     if result is None:
-        st.warning("Données insuffisantes pour cette date.")
+        st.error("Prévision indisponible : observation historique absente ou invalide. Aucune absence n’est convertie en risque faible.")
     else:
+        st.caption(f"Date cible : {result['date_cible']} · variables du {result['date_features']} · source : {result['source_features']}")
+        if result["source_features"] == "proxy_saisonnier":
+            st.info("Scénario saisonnier : moyennes historiques du mois, sans prévision météo de ce jour.")
         risk  = result["risk_level"]
         proba = result["probability"]
         color = risk_color(risk)
@@ -278,12 +171,12 @@ if predict_btn:
         with col_g:
             st.caption("Probabilité de pluie")
             st.progress(proba)
-            st.metric(label="", value=f"{round(proba*100,1)} %")
+            st.metric(label="Probabilité de pluie > 0,5 mm", value=f"{round(proba*100,1)} %")
         with col_i:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(f"""
             <div class="metric-card">
-                <div style="font-size:0.85rem;color:#888">Confiance</div>
+                <div style="font-size:0.85rem;color:#466271">Confiance du score</div>
                 <div style="font-size:1.2rem;font-weight:bold;color:#1F497D">
                     {result['confidence'].upper()}
                 </div>
@@ -296,10 +189,38 @@ if predict_btn:
 
         st.markdown("""
         <div class="disclaimer">
-        ℹ️ Estimation basée sur les données SYNOP historiques de Paris (75).
+        ℹ️ Estimation basée sur les données Open-Meteo Archive historiques de Paris (75).
         Ne se substitue pas à une prévision officielle Météo France.
         </div>
         """, unsafe_allow_html=True)
+
+# Quality and history: complete value alternatives and actionable empty states.
+st.markdown("---")
+with st.expander("Qualité et disponibilité des observations"):
+    invalid = df_quality.loc[~df_quality["valide"]]
+    st.metric("Lignes valides", f"{df_quality['valide'].mean():.1%}")
+    if invalid.empty:
+        st.success("Aucune anomalie sur les variables contrôlées du flux reçu.")
+    else:
+        st.warning(f"{len(invalid)} lignes exclues. La prévision observée de ces jours est suspendue.")
+        st.dataframe(invalid, hide_index=True, use_container_width=True)
+    st.caption("Dates, doublons, valeurs manquantes, plages physiques et cohérence min/max. Une précipitation J+1 absente conserve une cible inconnue.")
+    st.dataframe(df_quality, hide_index=True, use_container_width=True)
+
+with st.expander("Historique météo et export"):
+    start = st.date_input("Début de période", latest - timedelta(days=30))
+    end = st.date_input("Fin de période", latest)
+    if start > end:
+        st.error("La date de début doit précéder la date de fin.")
+    else:
+        history = df.loc[df["date"].between(start.isoformat(), end.isoformat())]
+        if history.empty:
+            st.info("Aucun résultat pour cette période. Modifiez les dates.")
+        else:
+            st.line_chart(history.set_index("date")[["temp_max", "temp_min"]])
+            st.caption("Températures en °C. Alternative : tableau complet ci-dessous. wind_avg est le maximum journalier du vent en km/h.")
+            st.dataframe(history, hide_index=True, use_container_width=True)
+            st.download_button("Télécharger la période CSV", history.to_csv(index=False).encode("utf-8-sig"), "observations_periode.csv", "text/csv")
 
 # Section métriques
 st.markdown("---")
@@ -307,7 +228,7 @@ with st.expander("📊 Performances du modèle — Transparence & Limites"):
     c1, c2, c3 = st.columns(3)
     c1.metric("Accuracy", f"{metrics['accuracy']:.1%}")
     c2.metric("F1-Score", f"{metrics['f1_score']:.3f}")
-    c3.metric("ROC-AUC",  f"{metrics['roc_auc']:.3f}")
+    c3.metric("ROC-AUC", "Indisponible" if metrics["roc_auc"] is None else f"{metrics['roc_auc']:.3f}")
     st.caption(f"Entraîné sur {metrics['n_train']} jours — Testé sur {metrics['n_test']} jours")
 
     st.markdown("### Matrice de confusion")
@@ -323,6 +244,8 @@ with st.expander("📊 Performances du modèle — Transparence & Limites"):
     ).sort_values("Importance", ascending=False)
     imp_df["Variable"] = imp_df["Variable"].str.replace("_"," ").str.title()
     st.bar_chart(imp_df.set_index("Variable"))
+    st.dataframe(imp_df, hide_index=True, use_container_width=True)
+    st.caption("Alternative au graphique : tableau ci-dessus. Importance globale, sans relation causale individuelle.")
 
     st.markdown("### ⚠️ Limitations")
     st.markdown("""
@@ -334,8 +257,8 @@ with st.expander("📊 Performances du modèle — Transparence & Limites"):
 
 st.markdown("---")
 st.markdown(
-    "<div style='text-align:center;font-size:0.8rem;color:#aaa'>"
-    "Projet Goutte d'Eau — MVP BLOC 2 — Mastère MTD IA — Institut Léonard de Vinci<br>"
-    "Source : SYNOP Météo France (data.gouv.fr) — Modèle : Random Forest (scikit-learn)"
+    "<div style='text-align:center;font-size:0.8rem;color:#466271'>"
+    "Projet Goutte d'Eau — B3 · démonstration publique — Mastère MTD IA — Institut Léonard de Vinci<br>"
+    "Source : Open-Meteo Archive · Pluie à J+1 strictement > 0,5 mm — Modèle : Random Forest (scikit-learn)"
     "</div>", unsafe_allow_html=True,
 )

@@ -130,13 +130,29 @@ curl "http://localhost:8000/predict?date=2024-07-14"
 
 ### Étape 4 — Lancer l'interface Streamlit
 
-> ⚠️ L'API FastAPI doit être lancée en parallèle (voir Étape 3)
+L’interface collecte les observations et entraîne son modèle directement. Elle fonctionne sans lancer FastAPI, sans base SQLite et sans fichier `model.pkl`.
 
 ```bash
 streamlit run src/app.py
 ```
 
 L'interface est accessible sur http://localhost:8501
+
+Sur Streamlit Community Cloud, le point d’entrée est `app.py` à la racine du dépôt. Les dépendances sont dans `requirements.txt`.
+
+### Correctifs B3 — qualité, historique et traçabilité
+
+- Les précipitations inconnues restent inconnues. La cible utilise la date calendaire J+1 ; un jour absent ne décale pas la cible sur le prochain jour disponible.
+- Les dates dupliquées, dates hors du périmètre 2020–aujourd’hui, valeurs manquantes et valeurs physiques aberrantes sont exclues. Le contrôle affiche les motifs et suspend la prévision observée correspondante.
+- La dernière observation valide reste utilisable pour estimer son lendemain, même si la cible n’est pas encore connue. Seules les cibles connues participent à l’entraînement et à l’évaluation.
+- Le cache du modèle dépend des données. « Actualiser les observations » recharge le flux ; une modification des données produit une nouvelle version `rf-<empreinte>`.
+- Chaque estimation affiche date cible, date des variables et source. Une observation historique absente est indisponible. Un scénario futur peut utiliser un proxy saisonnier, explicitement signalé.
+- Les bandes UX restent fixes : faible sous 0,35 ; modéré de 0,35 inclus à 0,60 exclu ; élevé dès 0,60. La confiance du score est indiquée « non calibrée ».
+- L’historique propose un filtre de période, un tableau alternatif au graphique et un export CSV. Les tableaux de qualité, confusion et importance permettent de lire les valeurs sans graphique.
+
+L’application utilise **Open-Meteo Archive**, aux coordonnées de Paris ; il ne s’agit pas d’un flux SYNOP ni d’une station instrumentale Paris-Montsouris. `wind_avg` conserve le nom historique du schéma et contient le **maximum journalier** du vent, en km/h.
+
+Cette démonstration est publique et ne comporte pas d’authentification applicative ni de RLS. Les écrans de connexion, rôles et incidents du prototype Figma constituent des spécifications ; leur présence dans la maquette ne prouve pas une implémentation en production. Le rapport Power BI doit être validé séparément dans son environnement natif.
 
 ---
 
