@@ -139,6 +139,7 @@ def test_streamlit_smoke_and_updated_data_cache(raw):
         assert not app.exception
         assert any('Modèle prêt' in v.value for v in app.success)
         version_before = next(v.value for v in app.caption if 'modèle rf-' in v.value)
+        app.date_input[0].set_value(date(2026,5,1))
         app.button[1].click().run()
         assert not app.exception
         assert any('source : ' in v.value for v in app.caption)
